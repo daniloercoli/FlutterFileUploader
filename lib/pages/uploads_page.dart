@@ -11,6 +11,7 @@ class UploadsPage extends StatefulWidget {
 
 class _UploadsPageState extends State<UploadsPage> {
   late Future<WpFilesResponse> _future;
+  bool _deleting = false;
 
   @override
   void initState() {
@@ -43,8 +44,18 @@ class _UploadsPageState extends State<UploadsPage> {
       i++;
     }
     return '${v.toStringAsFixed(i == 0 ? 0 : 1)} ${units[i]}';
-    // es: 154979 -> "151.4 KB"
   }
+
+  String _humanDate(int? epochSeconds) {
+    if (epochSeconds == null) return '';
+    final dt = DateTime.fromMillisecondsSinceEpoch(
+      epochSeconds * 1000,
+      isUtc: false,
+    );
+    return '${dt.year}-${_two(dt.month)}-${_two(dt.day)} ${_two(dt.hour)}:${_two(dt.minute)}';
+  }
+
+  String _two(int n) => n.toString().padLeft(2, '0');
 
   Widget _leadingThumb(WpFileItem item) {
     if (item.isImage) {
@@ -56,7 +67,6 @@ class _UploadsPageState extends State<UploadsPage> {
           height: 56,
           fit: BoxFit.cover,
           errorBuilder: (c, e, s) => _placeholderIcon(item),
-          // In produzione potresti usare un URL thumbnail se disponibile
         ),
       );
     }
@@ -79,82 +89,199 @@ class _UploadsPageState extends State<UploadsPage> {
     );
   }
 
+  Future<void> _showDetails(WpFileItem item) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('File details'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SelectableText('Name: ${item.name}'),
+            const SizedBox(height: 6),
+            SelectableText('MIME: ${item.mime ?? '—'}'),
+            const SizedBox(height: 6),
+            SelectableText('Size: ${_humanSize(item.size)}'),
+            const SizedBox(height: 6),
+            SelectableText('Modified: ${_humanDate(item.modified)}'),
+            const SizedBox(height: 12),
+            const Divider(),
+            const SizedBox(height: 6),
+            const Text('Remote URL:'),
+            const SizedBox(height: 4),
+            SelectableText(
+              item.url,
+              style: const TextStyle(fontFamily: 'monospace'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Close'),
+          ),
+          TextButton.icon(
+            onPressed: () async {
+              await _copyUrl(item.url);
+            },
+            icon: const Icon(Icons.copy),
+            label: const Text('Copy URL'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmAndDelete(WpFileItem item) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete file'),
+        content: Text('Do you want to delete “${item.name}” from the server?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.delete),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            label: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _deleting = true);
+    try {
+      final res = await WpApi.deleteFile(item.name);
+      if (!mounted) return;
+
+      if (res['ok'] == true) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Deleted: ${item.name}')));
+        await _reload(); // ricarica la lista dal server
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed (HTTP ${res['status']})')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Delete error: $e')));
+    } finally {
+      if (mounted) setState(() => _deleting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _reload,
-      child: FutureBuilder<WpFilesResponse>(
-        future: _future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snap.hasError) {
-            return ListView(
-              children: [
-                const SizedBox(height: 120),
-                Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      'Errore: ${snap.error}',
-                      textAlign: TextAlign.center,
+    return Stack(
+      children: [
+        RefreshIndicator(
+          onRefresh: _reload,
+          child: FutureBuilder<WpFilesResponse>(
+            future: _future,
+            builder: (context, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snap.hasError) {
+                return ListView(
+                  children: [
+                    const SizedBox(height: 120),
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Text(
+                          'Error: ${snap.error}',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              ],
-            );
-          }
+                  ],
+                );
+              }
 
-          final data = snap.data!;
-          final items = data.items;
+              final data = snap.data!;
+              final items = data.items;
 
-          if (items.isEmpty) {
-            return ListView(
-              children: const [
-                SizedBox(height: 120),
-                Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('Nessun file caricato.'),
-                  ),
-                ),
-              ],
-            );
-          }
+              if (items.isEmpty) {
+                return ListView(
+                  children: const [
+                    SizedBox(height: 120),
+                    Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text('No files found.'),
+                      ),
+                    ),
+                  ],
+                );
+              }
 
-          return ListView.separated(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            itemCount: items.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final item = items[index];
-              final size = _humanSize(item.size);
-              final subtitle = [
-                if (item.mime != null && item.mime!.isNotEmpty) item.mime,
-                if (size.isNotEmpty) size,
-              ].whereType<String>().join(' • ');
+              return ListView.separated(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                itemCount: items.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final item = items[index];
+                  final size = _humanSize(item.size);
+                  final subtitle = [
+                    if (item.mime != null && item.mime!.isNotEmpty) item.mime,
+                    if (size.isNotEmpty) size,
+                  ].whereType<String>().join(' • ');
 
-              return ListTile(
-                leading: _leadingThumb(item),
-                title: Text(
-                  item.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: subtitle.isEmpty ? null : Text(subtitle),
-                onTap: () => _copyUrl(item.url),
-                onLongPress: () => _copyUrl(item.url),
-                trailing: IconButton(
-                  tooltip: 'Copia URL',
-                  icon: const Icon(Icons.copy),
-                  onPressed: () => _copyUrl(item.url),
-                ),
+                  return ListTile(
+                    leading: _leadingThumb(item),
+                    title: Text(
+                      item.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: subtitle.isEmpty ? null : Text(subtitle),
+                    // TAP → dettaglio (modal)
+                    onTap: () => _showDetails(item),
+                    // LONG PRESS → conferma cancellazione
+                    onLongPress: () => _confirmAndDelete(item),
+                    trailing: IconButton(
+                      tooltip: 'Copy URL',
+                      icon: const Icon(Icons.copy),
+                      onPressed: () => _copyUrl(item.url),
+                    ),
+                  );
+                },
               );
             },
-          );
-        },
-      ),
+          ),
+        ),
+
+        // Piccolo overlay quando stiamo cancellando
+        if (_deleting)
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: true,
+              child: Container(
+                color: Colors.black.withOpacity(0.05),
+                alignment: Alignment.topCenter,
+                padding: const EdgeInsets.only(top: 8),
+                child: const LinearProgressIndicator(minHeight: 2),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

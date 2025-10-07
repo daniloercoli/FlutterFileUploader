@@ -162,4 +162,32 @@ class WpApi {
       return {'ok': false, 'status': 0, 'body': 'Errore: $e'};
     }
   }
+
+  static Future<Map<String, dynamic>> deleteFile(String fileName) async {
+    final baseUrl = await AppStorage.getUrl();
+    final username = await AppStorage.getUsername();
+    final password = await AppStorage.getPassword();
+
+    if (baseUrl == null || baseUrl.isEmpty) {
+      return {'ok': false, 'status': 0, 'body': 'URL non configurato'};
+    }
+    if (username == null ||
+        username.isEmpty ||
+        password == null ||
+        password.isEmpty) {
+      return {'ok': false, 'status': 0, 'body': 'Credenziali mancanti'};
+    }
+
+    final encoded = Uri.encodeComponent(fileName);
+    final uri = Uri.parse('$baseUrl/wp-json/fileuploader/v1/files/$encoded');
+    final auth = base64Encode(utf8.encode('$username:$password'));
+
+    final res = await http.delete(
+      uri,
+      headers: {'Authorization': 'Basic $auth'},
+    );
+
+    final ok = res.statusCode >= 200 && res.statusCode < 300;
+    return {'ok': ok, 'status': res.statusCode, 'body': res.body};
+  }
 }
